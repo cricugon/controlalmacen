@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Almacen Tablet</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">A</span>
+        <span>
+          <strong>Almacen</strong>
+          <small>Stock y partes</small>
+        </span>
+      </div>
+      <nav class="main-nav" aria-label="Menu principal">
+        <button class="nav-btn is-active" type="button" data-view="stock">Stock</button>
+        <button class="nav-btn" type="button" data-view="work-login">Parte</button>
+        <button class="nav-btn" type="button" data-view="shift">Turno</button>
+        <button class="nav-btn" type="button" data-view="circulars">Circulares</button>
+        <button class="nav-btn admin-nav" type="button" data-view="admin">Admin</button>
+      </nav>
+    </header>
+
+    <main id="app" class="app-shell" tabindex="-1"></main>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
