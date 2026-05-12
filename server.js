@@ -22,6 +22,12 @@ const WEEK_DAYS = ["Lunes", "Martes", "Miercoles", "Jueves", "Viernes", "Sabado"
 const EMPLOYEE_SHIFT_VALUES = new Set(["morning", "afternoon", "both", "off"]);
 const TASK_SHIFT_VALUES = new Set(["morning", "afternoon", "day"]);
 const TASK_TARGETS = new Set(["employee", "shift"]);
+const TASK_PRIORITIES = new Set(["low", "medium", "high"]);
+const TASK_PRIORITY_ORDER = {
+  high: 0,
+  medium: 1,
+  low: 2
+};
 const PUBLIC_DIR = path.join(__dirname, "public");
 const UPLOAD_DIR = path.join(__dirname, "uploads");
 
@@ -141,6 +147,14 @@ function normalizeTaskShift(value) {
   throw error;
 }
 
+function normalizeTaskPriority(value) {
+  const priority = String(value || "medium").trim();
+  if (TASK_PRIORITIES.has(priority)) return priority;
+  const error = new Error("Prioridad invalida");
+  error.status = 400;
+  throw error;
+}
+
 function normalizeShifts(input = {}) {
   const shifts = {};
   for (let day = 0; day < 7; day += 1) {
@@ -194,6 +208,7 @@ async function normalizeTaskPayload(body, options = {}) {
   const task = {
     title: requireText(body.title, "La tarea", 180),
     details: cleanText(body.details, 700),
+    priority: normalizeTaskPriority(body.priority),
     targetType,
     employeeCode: null,
     shift: null,
@@ -269,6 +284,7 @@ function taskToWorkItem(task, sourceType, dateString) {
     sourceId: String(task._id),
     title: task.title,
     details: task.details || "",
+    priority: normalizeTaskPriority(task.priority),
     targetType: task.targetType,
     employeeCode: task.employeeCode || null,
     shift: task.shift || null,
@@ -278,9 +294,82 @@ function taskToWorkItem(task, sourceType, dateString) {
     checked: false,
     checkedBy: null,
     checkedAt: null,
+    notApplicable: false,
+    notApplicableBy: null,
+    notApplicableAt: null,
     createdAt: new Date(),
     updatedAt: new Date()
   };
+}
+
+function taskWorkItemFields(task) {
+  return {
+    title: task.title,
+    details: task.details || "",
+    priority: normalizeTaskPriority(task.priority),
+    targetType: task.targetType,
+    employeeCode: task.employeeCode || null,
+    shift: task.shift || null,
+    production: task.production || null
+  };
+}
+
+function sameProduction(left, right) {
+  const leftItem = left?.item || null;
+  const rightItem = right?.item || null;
+  const leftTarget = Number(left?.target || 0);
+  const rightTarget = Number(right?.target || 0);
+  return leftItem === rightItem && leftTarget === rightTarget;
+}
+
+function sameTaskAssignment(item, task) {
+  return item.targetType === task.targetType
+    && (item.employeeCode || null) === (task.employeeCode || null)
+    && (item.shift || null) === (task.shift || null);
+}
+
+async function syncFutureWorkItemsFromTask(task, sourceType, sourceId) {
+  const today = todayString();
+  const items = await collection("workItems").find({
+    sourceType,
+    sourceId,
+    date: { $gte: today }
+  }).toArray();
+
+  const operations = items.map(async (item) => {
+    if (sourceType === "recurring" && !task.days.includes(weekdayIndex(item.date))) {
+      await collection("workItems").deleteOne({ _id: item._id });
+      return;
+    }
+
+    if (sourceType === "oneOff" && item.date !== task.dueDate) {
+      await collection("workItems").deleteOne({ _id: item._id });
+      return;
+    }
+
+    const resetProgress = !sameTaskAssignment(item, task) || !sameProduction(item.production, task.production);
+    const update = {
+      ...taskWorkItemFields(task),
+      updatedAt: new Date()
+    };
+
+    if (resetProgress) {
+      Object.assign(update, {
+        productionEntries: [],
+        totalQuantity: 0,
+        checked: false,
+        checkedBy: null,
+        checkedAt: null,
+        notApplicable: false,
+        notApplicableBy: null,
+        notApplicableAt: null
+      });
+    }
+
+    await collection("workItems").updateOne({ _id: item._id }, { $set: update });
+  });
+
+  await Promise.all(operations);
 }
 
 async function ensureWorkItemsForDate(dateString) {
@@ -309,6 +398,8 @@ async function ensureWorkItemsForDate(dateString) {
 
 function sortWorkItems(items) {
   return items.sort((a, b) => {
+    const priorityDiff = (TASK_PRIORITY_ORDER[normalizeTaskPriority(a.priority)] ?? 1) - (TASK_PRIORITY_ORDER[normalizeTaskPriority(b.priority)] ?? 1);
+    if (priorityDiff !== 0) return priorityDiff;
     if (a.targetType !== b.targetType) return a.targetType === "shift" ? -1 : 1;
     return a.title.localeCompare(b.title, "es");
   });
@@ -332,6 +423,7 @@ function productionTotal(entries) {
 }
 
 function isWorkItemComplete(item) {
+  if (item?.notApplicable) return true;
   if (!isProductionItem(item)) return Boolean(item.checked);
   return Math.max(0, Math.trunc(Number(item.totalQuantity || 0))) >= productionTarget(item);
 }
@@ -407,14 +499,18 @@ async function finalizeDay(dateString) {
       tasks: sortWorkItems(visible).map((item) => ({
         title: item.title,
         details: item.details || "",
+        priority: normalizeTaskPriority(item.priority),
         targetType: item.targetType,
         shift: item.shift || null,
         production: item.production || null,
         employeeQuantity: employeeQuantityForItem(item, employee.code),
         totalQuantity: Number(item.totalQuantity || 0),
-        checked: Boolean(item.checked),
+        checked: isWorkItemComplete(item),
         checkedBy: item.checkedBy || null,
-        checkedAt: item.checkedAt || null
+        checkedAt: item.checkedAt || null,
+        notApplicable: Boolean(item.notApplicable),
+        notApplicableBy: item.notApplicableBy || null,
+        notApplicableAt: item.notApplicableAt || null
       })),
       comment: commentText,
       finalizedAt: now,
@@ -461,6 +557,7 @@ async function liveWorkForAll(dateString) {
         _id: item._id,
         title: item.title,
         details: item.details || "",
+        priority: normalizeTaskPriority(item.priority),
         targetType: item.targetType,
         shift: item.shift || null,
         production: item.production || null,
@@ -468,7 +565,10 @@ async function liveWorkForAll(dateString) {
         totalQuantity: Number(item.totalQuantity || 0),
         checked: isWorkItemComplete(item),
         checkedBy: item.checkedBy || null,
-        checkedAt: item.checkedAt || null
+        checkedAt: item.checkedAt || null,
+        notApplicable: Boolean(item.notApplicable),
+        notApplicableBy: item.notApplicableBy || null,
+        notApplicableAt: item.notApplicableAt || null
       }))
     };
   });
@@ -711,6 +811,9 @@ app.patch("/api/work-items/:id/toggle", asyncHandler(async (req, res) => {
     checked,
     checkedBy: checked ? employeeCode : null,
     checkedAt: checked ? new Date() : null,
+    notApplicable: false,
+    notApplicableBy: null,
+    notApplicableAt: null,
     updatedAt: new Date()
   };
 
@@ -741,6 +844,43 @@ app.patch("/api/work-items/:id/progress", asyncHandler(async (req, res) => {
     ...progress,
     checkedBy: progress.checked ? employeeCode : null,
     checkedAt: progress.checked ? new Date() : null,
+    notApplicable: false,
+    notApplicableBy: null,
+    notApplicableAt: null,
+    updatedAt: new Date()
+  };
+
+  await collection("workItems").updateOne({ _id }, { $set: update });
+  const updated = await collection("workItems").findOne({ _id });
+  res.json(updated);
+}));
+
+app.patch("/api/work-items/:id/not-applicable", asyncHandler(async (req, res) => {
+  const _id = requireObjectId(req.params.id);
+  const employeeCode = normalizeEmployeeCode(req.body.employeeCode);
+  const [item, employee] = await Promise.all([
+    collection("workItems").findOne({ _id }),
+    collection("employees").findOne({ code: employeeCode })
+  ]);
+
+  if (!item) return res.status(404).json({ error: "Tarea no encontrada" });
+  if (!employee || !itemVisibleForEmployee(item, employee, item.date)) {
+    return res.status(403).json({ error: "Esta tarea no pertenece a ese trabajador" });
+  }
+
+  const productionEntries = isProductionItem(item)
+    ? (item.productionEntries || []).filter((entry) => entry.employeeCode !== employeeCode)
+    : (item.productionEntries || []);
+
+  const update = {
+    productionEntries,
+    totalQuantity: productionTotal(productionEntries),
+    checked: true,
+    checkedBy: employeeCode,
+    checkedAt: new Date(),
+    notApplicable: true,
+    notApplicableBy: employeeCode,
+    notApplicableAt: new Date(),
     updatedAt: new Date()
   };
 
@@ -788,13 +928,112 @@ app.get("/api/shift-tasks", asyncHandler(async (req, res) => {
     date,
     shift,
     employees: employees.map((employee) => ({ code: employee.code, name: employee.name })),
-    items
+    items: sortWorkItems(items)
   });
 }));
 
-app.get("/api/circulars", asyncHandler(async (_req, res) => {
-  const circulars = await collection("circulars").find({}).sort({ createdAt: -1 }).toArray();
-  res.json(circulars);
+app.get("/api/circulars", asyncHandler(async (req, res) => {
+  const employeeCode = normalizeEmployeeCode(req.query.employeeCode);
+  const employee = await collection("employees").findOne({ code: employeeCode });
+  if (!employee) return res.status(404).json({ error: "Trabajador no encontrado" });
+
+  const [circulars, reads] = await Promise.all([
+    collection("circulars").find({}).sort({ createdAt: -1 }).toArray(),
+    collection("circularReads").find({ employeeCode }).toArray()
+  ]);
+  const readsByCircular = new Map(reads.map((read) => [read.circularId, read]));
+
+  res.json({
+    employee: {
+      code: employee.code,
+      name: employee.name
+    },
+    circulars: circulars.map((circular) => {
+      const read = readsByCircular.get(String(circular._id));
+      return {
+        ...circular,
+        viewed: Boolean(read),
+        viewedAt: read?.readAt || null
+      };
+    })
+  });
+}));
+
+app.post("/api/circulars/:id/read", asyncHandler(async (req, res) => {
+  const _id = requireObjectId(req.params.id);
+  const employeeCode = normalizeEmployeeCode(req.body.employeeCode);
+  const [circular, employee] = await Promise.all([
+    collection("circulars").findOne({ _id }),
+    collection("employees").findOne({ code: employeeCode })
+  ]);
+
+  if (!circular) return res.status(404).json({ error: "Circular no encontrada" });
+  if (!employee) return res.status(404).json({ error: "Trabajador no encontrado" });
+
+  const now = new Date();
+  await collection("circularReads").updateOne(
+    { circularId: String(_id), employeeCode },
+    {
+      $set: {
+        employeeName: employee.name,
+        updatedAt: now
+      },
+      $setOnInsert: {
+        circularId: String(_id),
+        employeeCode,
+        readAt: now,
+        createdAt: now
+      }
+    },
+    { upsert: true }
+  );
+
+  const read = await collection("circularReads").findOne({ circularId: String(_id), employeeCode });
+  res.json({
+    ...circular,
+    viewed: true,
+    viewedAt: read?.readAt || now
+  });
+}));
+
+app.get("/api/admin/circulars", requireAdmin, asyncHandler(async (_req, res) => {
+  const [circulars, employees, reads] = await Promise.all([
+    collection("circulars").find({}).sort({ createdAt: -1 }).toArray(),
+    collection("employees").find({}).sort({ code: 1 }).toArray(),
+    collection("circularReads").find({}).toArray()
+  ]);
+
+  const readsByCircular = new Map();
+  for (const read of reads) {
+    if (!readsByCircular.has(read.circularId)) readsByCircular.set(read.circularId, []);
+    readsByCircular.get(read.circularId).push(read);
+  }
+
+  res.json(circulars.map((circular) => {
+    const circularId = String(circular._id);
+    const readBy = (readsByCircular.get(circularId) || [])
+      .sort((a, b) => a.employeeCode.localeCompare(b.employeeCode))
+      .map((read) => ({
+        employeeCode: read.employeeCode,
+        employeeName: read.employeeName || "",
+        readAt: read.readAt || null
+      }));
+    const readCodes = new Set(readBy.map((read) => read.employeeCode));
+    const unreadBy = employees
+      .filter((employee) => !readCodes.has(employee.code))
+      .map((employee) => ({
+        employeeCode: employee.code,
+        employeeName: employee.name
+      }));
+
+    return {
+      ...circular,
+      readCount: readBy.length,
+      totalEmployees: employees.length,
+      readBy,
+      unreadBy
+    };
+  }));
 }));
 
 app.get("/api/admin/employees", requireAdmin, asyncHandler(async (_req, res) => {
@@ -831,7 +1070,10 @@ app.put("/api/admin/employees/:code", requireAdmin, asyncHandler(async (req, res
 
 app.delete("/api/admin/employees/:code", requireAdmin, asyncHandler(async (req, res) => {
   const code = normalizeEmployeeCode(req.params.code);
-  await collection("employees").deleteOne({ code });
+  await Promise.all([
+    collection("employees").deleteOne({ code }),
+    collection("circularReads").deleteMany({ employeeCode: code })
+  ]);
   res.status(204).end();
 }));
 
@@ -854,6 +1096,25 @@ app.post("/api/admin/recurring-tasks", requireAdmin, asyncHandler(async (req, re
   const result = await collection("recurringTasks").insertOne(doc);
   await ensureWorkItemsForDate(todayString());
   res.status(201).json({ ...doc, _id: result.insertedId });
+}));
+
+app.put("/api/admin/recurring-tasks/:id", requireAdmin, asyncHandler(async (req, res) => {
+  const _id = requireObjectId(req.params.id);
+  const existing = await collection("recurringTasks").findOne({ _id, active: true });
+  if (!existing) return res.status(404).json({ error: "Tarea no encontrada" });
+
+  const task = await normalizeTaskPayload(req.body, { recurring: true });
+  const update = {
+    ...task,
+    updatedAt: new Date()
+  };
+
+  await collection("recurringTasks").updateOne({ _id }, { $set: update });
+  await syncFutureWorkItemsFromTask(task, "recurring", String(_id));
+  await ensureWorkItemsForDate(todayString());
+
+  const updated = await collection("recurringTasks").findOne({ _id });
+  res.json(updated);
 }));
 
 app.delete("/api/admin/recurring-tasks/:id", requireAdmin, asyncHandler(async (req, res) => {
@@ -883,6 +1144,25 @@ app.post("/api/admin/oneoff-tasks", requireAdmin, asyncHandler(async (req, res) 
   res.status(201).json({ ...doc, _id: result.insertedId });
 }));
 
+app.put("/api/admin/oneoff-tasks/:id", requireAdmin, asyncHandler(async (req, res) => {
+  const _id = requireObjectId(req.params.id);
+  const existing = await collection("oneOffTasks").findOne({ _id, active: true });
+  if (!existing) return res.status(404).json({ error: "Tarea no encontrada" });
+
+  const task = await normalizeTaskPayload(req.body, { oneOff: true });
+  const update = {
+    ...task,
+    updatedAt: new Date()
+  };
+
+  await collection("oneOffTasks").updateOne({ _id }, { $set: update });
+  await syncFutureWorkItemsFromTask(task, "oneOff", String(_id));
+  if (task.dueDate >= todayString()) await ensureWorkItemsForDate(task.dueDate);
+
+  const updated = await collection("oneOffTasks").findOne({ _id });
+  res.json(updated);
+}));
+
 app.delete("/api/admin/oneoff-tasks/:id", requireAdmin, asyncHandler(async (req, res) => {
   const _id = requireObjectId(req.params.id);
   await collection("oneOffTasks").updateOne({ _id }, { $set: { active: false, updatedAt: new Date() } });
@@ -909,7 +1189,10 @@ app.post("/api/admin/circulars", requireAdmin, upload.single("file"), asyncHandl
 app.delete("/api/admin/circulars/:id", requireAdmin, asyncHandler(async (req, res) => {
   const _id = requireObjectId(req.params.id);
   const circular = await collection("circulars").findOne({ _id });
-  await collection("circulars").deleteOne({ _id });
+  await Promise.all([
+    collection("circulars").deleteOne({ _id }),
+    collection("circularReads").deleteMany({ circularId: String(_id) })
+  ]);
 
   if (circular?.fileUrl?.startsWith("/uploads/")) {
     const filePath = path.join(UPLOAD_DIR, path.basename(circular.fileUrl));
@@ -958,6 +1241,8 @@ async function ensureIndexes() {
     collection("recurringTasks").createIndex({ active: 1, days: 1 }),
     collection("oneOffTasks").createIndex({ active: 1, dueDate: 1 }),
     collection("comments").createIndex({ date: 1, employeeCode: 1 }, { unique: true }),
+    collection("circularReads").createIndex({ circularId: 1, employeeCode: 1 }, { unique: true }),
+    collection("circularReads").createIndex({ employeeCode: 1 }),
     collection("dailySummaries").createIndex({ date: 1, employeeCode: 1 }, { unique: true }),
     collection("workItems").createIndex(
       { date: 1, sourceType: 1, sourceId: 1, targetType: 1, employeeCode: 1, shift: 1 },

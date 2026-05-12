@@ -9,6 +9,11 @@ const SHIFT_LABELS = {
   day: "Todo el dia",
   off: "Libre"
 };
+const PRIORITY_LABELS = {
+  low: "Baja",
+  medium: "Media",
+  high: "Alta"
+};
 
 const state = {
   view: "stock",
@@ -16,6 +21,10 @@ const state = {
   workCode: "",
   workData: null,
   commentTimer: null,
+  circularCode: "",
+  circularEmployee: null,
+  circulars: null,
+  openCircularId: null,
   shift: new Date().getHours() < 15 ? "morning" : "afternoon",
   adminToken: localStorage.getItem("adminToken") || "",
   adminData: null,
@@ -48,6 +57,31 @@ function prettyDate(value) {
   if (!value || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return "";
   const [year, month, day] = value.split("-");
   return `${day}/${month}/${year}`;
+}
+
+function taskPriority(task) {
+  return PRIORITY_LABELS[task?.priority] ? task.priority : "medium";
+}
+
+function taskPriorityBadge(task) {
+  const priority = taskPriority(task);
+  return `<span class="priority-badge priority-${priority}">${PRIORITY_LABELS[priority]}</span>`;
+}
+
+function taskPriorityClass(task) {
+  return `priority-${taskPriority(task)}`;
+}
+
+function formatDateTime(value) {
+  return value ? new Date(value).toLocaleString("es-ES") : "";
+}
+
+function selectedAttr(value, expected) {
+  return value === expected ? "selected" : "";
+}
+
+function checkedAttr(value) {
+  return value ? "checked" : "";
 }
 
 function showToast(message) {
@@ -306,11 +340,11 @@ function workTaskRow(item) {
 
   const scope = item.targetType === "shift" ? `Turno ${SHIFT_LABELS[item.shift]}` : "Individual";
   return `
-    <label class="task-row ${item.checked ? "is-checked" : ""}" data-task-row="${item._id}">
+    <label class="task-row ${taskPriorityClass(item)} ${item.checked ? "is-checked" : ""}" data-task-row="${item._id}">
       <input type="checkbox" data-work-check="${item._id}" ${item.checked ? "checked" : ""}>
       <span class="check-ui" aria-hidden="true"></span>
       <span>
-        <strong class="task-title">${escapeHtml(item.title)}</strong>
+        <span class="task-title-line"><strong class="task-title">${escapeHtml(item.title)}</strong>${taskPriorityBadge(item)}</span>
         <span class="scope">${escapeHtml(scope)}</span>
         ${item.details ? `<p class="task-details">${escapeHtml(item.details)}</p>` : ""}
       </span>
@@ -323,12 +357,13 @@ function productionTaskRow(item) {
   const mine = ownQuantity(item);
   const total = totalQuantity(item);
   const target = Number(item.production.target || 0);
+  const noProceed = Boolean(item.notApplicable);
   return `
-    <article class="task-row production-task ${item.checked ? "is-checked" : ""}" data-task-row="${item._id}">
+    <article class="task-row production-task ${taskPriorityClass(item)} ${item.checked ? "is-checked" : ""}" data-task-row="${item._id}">
       <span class="check-ui" aria-hidden="true"></span>
       <div class="task-content">
-        <strong class="task-title">${escapeHtml(item.title)}</strong>
-        <span class="scope">${escapeHtml(scope)} - ${total}/${target} ${escapeHtml(item.production.item)} - tu llevas ${mine}</span>
+        <span class="task-title-line"><strong class="task-title">${escapeHtml(item.title)}</strong>${taskPriorityBadge(item)}</span>
+        <span class="scope">${noProceed ? "No procede" : `${escapeHtml(scope)} - ${total}/${target} ${escapeHtml(item.production.item)} - tu llevas ${mine}`}</span>
         ${item.details ? `<p class="task-details">${escapeHtml(item.details)}</p>` : ""}
         <div class="production-controls">
           <button class="qty-button" type="button" data-production-step="-1" data-id="${item._id}">-</button>
@@ -338,6 +373,7 @@ function productionTaskRow(item) {
           </label>
           <button class="qty-button" type="button" data-production-step="1" data-id="${item._id}">+</button>
           <button class="button primary" type="button" data-production-complete="${item._id}">Completar</button>
+          <button class="button secondary" type="button" data-production-not-applicable="${item._id}">No procede</button>
         </div>
       </div>
     </article>
@@ -376,6 +412,29 @@ async function updateProduction(id, quantity, complete = false) {
         employeeCode: state.workData?.employee?.code,
         quantity,
         complete
+      }
+    });
+    const item = state.workData.items.find((entry) => entry._id === id);
+    if (item) {
+      Object.assign(item, updated);
+      const currentRow = appEl.querySelector(`[data-task-row="${id}"]`);
+      if (currentRow) currentRow.outerHTML = workTaskRow(item);
+    }
+  } catch (error) {
+    row?.querySelectorAll("button,input").forEach((control) => { control.disabled = false; });
+    showToast(error.message);
+  }
+}
+
+async function markNotApplicable(id) {
+  const row = appEl.querySelector(`[data-task-row="${id}"]`);
+  row?.querySelectorAll("button,input").forEach((control) => { control.disabled = true; });
+
+  try {
+    const updated = await api(`/api/work-items/${id}/not-applicable`, {
+      method: "PATCH",
+      body: {
+        employeeCode: state.workData?.employee?.code
       }
     });
     const item = state.workData.items.find((entry) => entry._id === id);
@@ -442,13 +501,13 @@ async function renderShift() {
 
 function shiftTaskRow(item) {
   const progress = isProductionTask(item)
-    ? ` - ${Number(item.totalQuantity || 0)}/${Number(item.production.target || 0)} ${escapeHtml(item.production.item)}`
+    ? (item.notApplicable ? " - No procede" : ` - ${Number(item.totalQuantity || 0)}/${Number(item.production.target || 0)} ${escapeHtml(item.production.item)}`)
     : "";
   return `
-    <article class="task-row ${item.checked ? "is-checked" : ""}">
+    <article class="task-row ${taskPriorityClass(item)} ${item.checked ? "is-checked" : ""}">
       <span class="check-ui" aria-hidden="true"></span>
       <span>
-        <strong class="task-title">${escapeHtml(item.title)}</strong>
+        <span class="task-title-line"><strong class="task-title">${escapeHtml(item.title)}</strong>${taskPriorityBadge(item)}</span>
         <span class="scope">${item.checked ? "Completada" : "Pendiente"}${progress}</span>
         ${item.details ? `<p class="task-details">${escapeHtml(item.details)}</p>` : ""}
       </span>
@@ -457,16 +516,75 @@ function shiftTaskRow(item) {
 }
 
 async function renderCirculars() {
+  if (!state.circularEmployee) return renderCircularLogin();
+  return renderCircularList();
+}
+
+function renderCircularLogin() {
+  state.circularCode = "";
+  state.circularEmployee = null;
+  state.circulars = null;
+  state.openCircularId = null;
+  appEl.innerHTML = `
+    <section class="login-panel">
+      <h1>PIN trabajador</h1>
+      <div class="code-display" aria-label="PIN introducido">
+        <span class="code-cell" data-circular-code-cell="0"></span>
+        <span class="code-cell" data-circular-code-cell="1"></span>
+      </div>
+      <div class="keypad">
+        ${[1, 2, 3, 4, 5, 6, 7, 8, 9].map((digit) => `<button type="button" data-circular-digit="${digit}">${digit}</button>`).join("")}
+        <button type="button" data-circular-code-clear>CLR</button>
+        <button type="button" data-circular-digit="0">0</button>
+        <button type="button" data-circular-code-back>DEL</button>
+      </div>
+    </section>
+  `;
+}
+
+function updateCircularCodeDisplay() {
+  appEl.querySelectorAll("[data-circular-code-cell]").forEach((cell, index) => {
+    const digit = state.circularCode[index] || "";
+    cell.textContent = digit;
+    cell.classList.toggle("is-filled", Boolean(digit));
+  });
+}
+
+async function pushCircularDigit(digit) {
+  if (state.circularCode.length >= 2) return;
+  state.circularCode += String(digit);
+  updateCircularCodeDisplay();
+  if (state.circularCode.length === 2) {
+    await loadCircularsForWorker(state.circularCode);
+  }
+}
+
+async function loadCircularsForWorker(code) {
   setLoading("Cargando circulares");
   try {
-    const circulars = await api("/api/circulars");
-    appEl.innerHTML = `
+    const data = await api(`/api/circulars?employeeCode=${encodeURIComponent(code)}`);
+    state.circularEmployee = data.employee;
+    state.circulars = data.circulars || [];
+    state.openCircularId = null;
+    renderCircularList();
+  } catch (error) {
+    showToast(error.message);
+    renderCircularLogin();
+  }
+}
+
+function renderCircularList() {
+  const circulars = state.circulars || [];
+  appEl.innerHTML = `
       <section class="view-head">
         <div>
           <h1>Circulares</h1>
-          <p>${circulars.length} publicaciones</p>
+          <p>${escapeHtml(state.circularEmployee.code)} - ${escapeHtml(state.circularEmployee.name)} - ${circulars.length} publicaciones</p>
         </div>
-        <button class="button secondary" type="button" data-refresh-view="circulars">Actualizar</button>
+        <div class="button-row">
+          <button class="button secondary" type="button" data-circular-reload>Actualizar</button>
+          <button class="button secondary" type="button" data-circular-logout>Salir</button>
+        </div>
       </section>
       ${circulars.length ? `
         <section class="grid notice-grid">
@@ -474,20 +592,40 @@ async function renderCirculars() {
         </section>
       ` : emptyState("No hay circulares publicadas")}
     `;
-  } catch (error) {
-    renderError(error);
-  }
 }
 
 function circularCard(circular) {
+  const isOpen = state.openCircularId === String(circular._id);
   return `
-    <article class="notice-card">
-      <h3>${escapeHtml(circular.title)}</h3>
-      ${circular.body ? `<p>${escapeHtml(circular.body)}</p>` : ""}
-      ${circular.fileUrl ? `<a class="button secondary" href="${escapeHtml(circular.fileUrl)}" target="_blank" rel="noreferrer">${escapeHtml(circular.fileName || "Abrir archivo")}</a>` : ""}
-      <p class="meta">${new Date(circular.createdAt).toLocaleString("es-ES")}</p>
+    <article class="notice-card ${circular.viewed ? "is-viewed" : ""}">
+      <div class="notice-head">
+        <h3>${escapeHtml(circular.title)}</h3>
+        <span class="read-pill ${circular.viewed ? "done" : "pending"}">${circular.viewed ? "Vista" : "No vista"}</span>
+      </div>
+      ${isOpen ? `
+        ${circular.body ? `<p>${escapeHtml(circular.body)}</p>` : ""}
+        ${circular.fileUrl ? `<a class="button secondary" href="${escapeHtml(circular.fileUrl)}" target="_blank" rel="noreferrer">${escapeHtml(circular.fileName || "Abrir archivo")}</a>` : ""}
+      ` : `<button class="button primary" type="button" data-circular-open="${circular._id}">Abrir circular</button>`}
+      <p class="meta">${formatDateTime(circular.createdAt)}${circular.viewedAt ? ` - vista ${formatDateTime(circular.viewedAt)}` : ""}</p>
     </article>
   `;
+}
+
+async function openCircular(id) {
+  try {
+    const updated = await api(`/api/circulars/${id}/read`, {
+      method: "POST",
+      body: {
+        employeeCode: state.circularEmployee?.code
+      }
+    });
+    const circular = state.circulars.find((entry) => entry._id === id);
+    if (circular) Object.assign(circular, updated);
+    state.openCircularId = id;
+    renderCircularList();
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 async function renderAdmin() {
@@ -517,7 +655,7 @@ async function renderAdmin() {
         api("/api/admin/employees"),
         api("/api/admin/recurring-tasks"),
         api("/api/admin/oneoff-tasks"),
-        api("/api/circulars")
+        api("/api/admin/circulars")
       ]);
       state.adminData = { products, categories, employees, recurring, oneOff, circulars, liveWork: null, summaries: null };
     }
@@ -694,12 +832,7 @@ function renderAdminRecurring() {
       </form>
     </article>
     <section class="admin-list">
-      ${state.adminData.recurring.length ? state.adminData.recurring.map((task) => `
-        <article class="admin-item">
-          <span><strong>${escapeHtml(task.title)}</strong><span class="meta">${taskTargetLabel(task)} - ${task.days.map((day) => DAYS[day]).join(", ")}${taskProductionLabel(task)}</span></span>
-          <button class="button danger" type="button" data-admin-delete="recurring" data-id="${task._id}">Eliminar</button>
-        </article>
-      `).join("") : emptyState("Sin tareas diarias")}
+      ${state.adminData.recurring.length ? state.adminData.recurring.map(recurringTaskEditCard).join("") : emptyState("Sin tareas diarias")}
     </section>
   `;
 }
@@ -718,49 +851,103 @@ function renderAdminOneOff() {
       </form>
     </article>
     <section class="admin-list">
-      ${state.adminData.oneOff.length ? state.adminData.oneOff.map((task) => `
-        <article class="admin-item">
-          <span><strong>${escapeHtml(task.title)}</strong><span class="meta">${prettyDate(task.dueDate)} - ${taskTargetLabel(task)}${taskProductionLabel(task)}</span></span>
-          <button class="button danger" type="button" data-admin-delete="oneoff" data-id="${task._id}">Eliminar</button>
-        </article>
-      `).join("") : emptyState("Sin tareas puntuales")}
+      ${state.adminData.oneOff.length ? state.adminData.oneOff.map(oneOffTaskEditCard).join("") : emptyState("Sin tareas puntuales")}
     </section>
   `;
 }
 
-function taskCommonFields() {
-  const employees = state.adminData.employees;
+function recurringTaskEditCard(task) {
   return `
-    <label class="field"><span>Tarea</span><input name="title" required></label>
-    <label class="field"><span>Detalle</span><textarea name="details"></textarea></label>
+    <form class="admin-card stack-form task-form" data-admin-form="recurring-update" data-id="${task._id}">
+      <div class="section-head compact">
+        <div>
+          <h3>${escapeHtml(task.title)}</h3>
+          <p class="meta">${taskTargetLabel(task)} - ${task.days.map((day) => DAYS[day]).join(", ")}${taskProductionLabel(task)}</p>
+        </div>
+        ${taskPriorityBadge(task)}
+      </div>
+      <div class="form-grid">${taskCommonFields(task)}</div>
+      <div class="form-grid">${taskProductionFields(task)}</div>
+      <div class="day-picker">${DAYS.map((day, index) => `
+        <label class="day-check">${day}<input type="checkbox" name="days" value="${index}" ${checkedAttr((task.days || []).includes(index))}></label>
+      `).join("")}</div>
+      <div class="admin-actions">
+        <button class="button primary" type="submit">Guardar</button>
+        <button class="button danger" type="button" data-admin-delete="recurring" data-id="${task._id}">Eliminar</button>
+      </div>
+    </form>
+  `;
+}
+
+function oneOffTaskEditCard(task) {
+  return `
+    <form class="admin-card stack-form task-form" data-admin-form="oneoff-update" data-id="${task._id}">
+      <div class="section-head compact">
+        <div>
+          <h3>${escapeHtml(task.title)}</h3>
+          <p class="meta">${prettyDate(task.dueDate)} - ${taskTargetLabel(task)}${taskProductionLabel(task)}</p>
+        </div>
+        ${taskPriorityBadge(task)}
+      </div>
+      <div class="form-grid">${taskCommonFields(task)}</div>
+      <div class="form-grid">
+        ${taskProductionFields(task)}
+        <label class="field"><span>Fecha</span><input name="dueDate" type="date" value="${escapeHtml(task.dueDate || todayISO())}" required></label>
+      </div>
+      <div class="admin-actions">
+        <button class="button primary" type="submit">Guardar</button>
+        <button class="button danger" type="button" data-admin-delete="oneoff" data-id="${task._id}">Eliminar</button>
+      </div>
+    </form>
+  `;
+}
+
+function taskCommonFields(task = {}) {
+  const employees = state.adminData.employees;
+  const priority = taskPriority(task);
+  const targetType = task.targetType || "shift";
+  const shift = task.shift || "morning";
+  const employeeCode = task.employeeCode || employees[0]?.code || "";
+  return `
+    <label class="field"><span>Tarea</span><input name="title" value="${escapeHtml(task.title || "")}" required></label>
+    <label class="field"><span>Detalle</span><textarea name="details">${escapeHtml(task.details || "")}</textarea></label>
+    <label class="field">
+      <span>Prioridad</span>
+      <select name="priority">
+        <option value="low" ${selectedAttr(priority, "low")}>Baja</option>
+        <option value="medium" ${selectedAttr(priority, "medium")}>Media</option>
+        <option value="high" ${selectedAttr(priority, "high")}>Alta</option>
+      </select>
+    </label>
     <label class="field">
       <span>Destino</span>
       <select name="targetType" data-target-type>
-        <option value="shift">Turno</option>
-        <option value="employee">Trabajador</option>
+        <option value="shift" ${selectedAttr(targetType, "shift")}>Turno</option>
+        <option value="employee" ${selectedAttr(targetType, "employee")}>Trabajador</option>
       </select>
     </label>
     <label class="field target-shift">
       <span>Turno</span>
       <select name="shift">
-        <option value="morning">Manana</option>
-        <option value="afternoon">Tarde</option>
-        <option value="day">Todo el dia</option>
+        <option value="morning" ${selectedAttr(shift, "morning")}>Manana</option>
+        <option value="afternoon" ${selectedAttr(shift, "afternoon")}>Tarde</option>
+        <option value="day" ${selectedAttr(shift, "day")}>Todo el dia</option>
       </select>
     </label>
     <label class="field target-employee is-hidden">
       <span>Trabajador</span>
       <select name="employeeCode">
-        ${employees.map((employee) => `<option value="${employee.code}">${escapeHtml(employee.code)} - ${escapeHtml(employee.name)}</option>`).join("")}
+        ${employees.map((employee) => `<option value="${employee.code}" ${selectedAttr(employeeCode, employee.code)}>${escapeHtml(employee.code)} - ${escapeHtml(employee.name)}</option>`).join("")}
       </select>
     </label>
   `;
 }
 
-function taskProductionFields() {
+function taskProductionFields(task = {}) {
+  const production = task.production || {};
   return `
-    <label class="field"><span>Item productividad</span><input name="productionItem" placeholder="Ej. bowls pequenos"></label>
-    <label class="field"><span>Cantidad objetivo</span><input name="productionTarget" type="number" min="0" value="0"></label>
+    <label class="field"><span>Item productividad</span><input name="productionItem" placeholder="Ej. bowls pequenos" value="${escapeHtml(production.item || "")}"></label>
+    <label class="field"><span>Cantidad objetivo</span><input name="productionTarget" type="number" min="0" value="${Number(production.target || 0)}"></label>
   `;
 }
 
@@ -786,13 +973,34 @@ function renderAdminCirculars() {
       </form>
     </article>
     <section class="admin-list">
-      ${state.adminData.circulars.length ? state.adminData.circulars.map((circular) => `
-        <article class="admin-item">
-          <span><strong>${escapeHtml(circular.title)}</strong><span class="meta">${circular.fileName ? escapeHtml(circular.fileName) : "Sin archivo"}</span></span>
-          <button class="button danger" type="button" data-admin-delete="circular" data-id="${circular._id}">Eliminar</button>
-        </article>
-      `).join("") : emptyState("Sin circulares")}
+      ${state.adminData.circulars.length ? state.adminData.circulars.map(adminCircularItem).join("") : emptyState("Sin circulares")}
     </section>
+  `;
+}
+
+function adminCircularItem(circular) {
+  const readBy = circular.readBy || [];
+  const unreadBy = circular.unreadBy || [];
+  const readNames = readBy.length
+    ? readBy.map((read) => `${read.employeeCode} - ${read.employeeName || ""}`.trim()).join(", ")
+    : "Nadie";
+  const unreadNames = unreadBy.length
+    ? unreadBy.map((employee) => `${employee.employeeCode} - ${employee.employeeName}`.trim()).join(", ")
+    : "Todos la han visto";
+
+  return `
+    <article class="admin-item circular-admin-item">
+      <span>
+        <strong>${escapeHtml(circular.title)}</strong>
+        <span class="meta">${circular.fileName ? escapeHtml(circular.fileName) : "Sin archivo"} - Vista por ${Number(circular.readCount || 0)}/${Number(circular.totalEmployees || 0)}</span>
+        <details class="read-details">
+          <summary>Control de lectura</summary>
+          <p><strong>Vistas:</strong> ${escapeHtml(readNames)}</p>
+          <p><strong>No vistas:</strong> ${escapeHtml(unreadNames)}</p>
+        </details>
+      </span>
+      <button class="button danger" type="button" data-admin-delete="circular" data-id="${circular._id}">Eliminar</button>
+    </article>
   `;
 }
 
@@ -843,10 +1051,10 @@ function liveWorkCard(worker) {
 
 function liveTaskLine(task) {
   const production = task.production
-    ? ` - ${Number(task.employeeQuantity || 0)} propios / ${Number(task.totalQuantity || 0)} total de ${Number(task.production.target || 0)} ${escapeHtml(task.production.item)}`
+    ? (task.notApplicable ? " - No procede" : ` - ${Number(task.employeeQuantity || 0)} propios / ${Number(task.totalQuantity || 0)} total de ${Number(task.production.target || 0)} ${escapeHtml(task.production.item)}`)
     : "";
   const scope = task.targetType === "shift" ? `Turno ${SHIFT_LABELS[task.shift]}` : "Individual";
-  return `<li>${task.checked ? "OK" : "NO"} - ${escapeHtml(task.title)} <span class="meta">(${escapeHtml(scope)}${production})</span></li>`;
+  return `<li>${task.checked ? "OK" : "NO"} - ${escapeHtml(task.title)} ${taskPriorityBadge(task)} <span class="meta">(${escapeHtml(scope)}${production})</span></li>`;
 }
 
 function configureAdminLiveRefresh() {
@@ -891,9 +1099,9 @@ function summaryCard(summary) {
 
 function summaryTaskLine(task) {
   const production = task.production
-    ? ` - ${Number(task.employeeQuantity || 0)} propios / ${Number(task.totalQuantity || 0)} total de ${Number(task.production.target || 0)} ${escapeHtml(task.production.item)}`
+    ? (task.notApplicable ? " - No procede" : ` - ${Number(task.employeeQuantity || 0)} propios / ${Number(task.totalQuantity || 0)} total de ${Number(task.production.target || 0)} ${escapeHtml(task.production.item)}`)
     : "";
-  return `<li>${task.checked ? "OK" : "NO"} - ${escapeHtml(task.title)}${production}</li>`;
+  return `<li>${task.checked ? "OK" : "NO"} - ${escapeHtml(task.title)} ${taskPriorityBadge(task)}${production}</li>`;
 }
 
 function syncAllTargetBlocks() {
@@ -939,6 +1147,7 @@ function taskPayloadFromForm(form, extra = {}) {
   return {
     title: data.get("title"),
     details: data.get("details"),
+    priority: data.get("priority"),
     targetType: data.get("targetType"),
     employeeCode: data.get("employeeCode"),
     shift: data.get("shift"),
@@ -1034,10 +1243,26 @@ async function handleAdminSubmit(form) {
     });
   }
 
+  if (kind === "recurring-update") {
+    const data = new FormData(form);
+    await api(`/api/admin/recurring-tasks/${form.dataset.id}`, {
+      method: "PUT",
+      body: taskPayloadFromForm(form, { days: data.getAll("days") })
+    });
+  }
+
   if (kind === "oneoff-create") {
     const data = new FormData(form);
     await api("/api/admin/oneoff-tasks", {
       method: "POST",
+      body: taskPayloadFromForm(form, { dueDate: data.get("dueDate") })
+    });
+  }
+
+  if (kind === "oneoff-update") {
+    const data = new FormData(form);
+    await api(`/api/admin/oneoff-tasks/${form.dataset.id}`, {
+      method: "PUT",
       body: taskPayloadFromForm(form, { dueDate: data.get("dueDate") })
     });
   }
@@ -1100,6 +1325,11 @@ appEl.addEventListener("click", async (event) => {
     return pushWorkDigit(digit.dataset.digit);
   }
 
+  const circularDigit = event.target.closest("[data-circular-digit]");
+  if (circularDigit) {
+    return pushCircularDigit(circularDigit.dataset.circularDigit);
+  }
+
   if (event.target.closest("[data-code-clear]")) {
     state.workCode = "";
     return updateCodeDisplay();
@@ -1108,6 +1338,16 @@ appEl.addEventListener("click", async (event) => {
   if (event.target.closest("[data-code-back]")) {
     state.workCode = state.workCode.slice(0, -1);
     return updateCodeDisplay();
+  }
+
+  if (event.target.closest("[data-circular-code-clear]")) {
+    state.circularCode = "";
+    return updateCircularCodeDisplay();
+  }
+
+  if (event.target.closest("[data-circular-code-back]")) {
+    state.circularCode = state.circularCode.slice(0, -1);
+    return updateCircularCodeDisplay();
   }
 
   const localView = event.target.closest("[data-view-local]");
@@ -1125,6 +1365,28 @@ appEl.addEventListener("click", async (event) => {
   const completeButton = event.target.closest("[data-production-complete]");
   if (completeButton) {
     return updateProduction(completeButton.dataset.productionComplete, 0, true);
+  }
+
+  const notApplicableButton = event.target.closest("[data-production-not-applicable]");
+  if (notApplicableButton) {
+    return markNotApplicable(notApplicableButton.dataset.productionNotApplicable);
+  }
+
+  const circularOpen = event.target.closest("[data-circular-open]");
+  if (circularOpen) {
+    return openCircular(circularOpen.dataset.circularOpen);
+  }
+
+  if (event.target.closest("[data-circular-reload]")) {
+    return loadCircularsForWorker(state.circularEmployee?.code || "");
+  }
+
+  if (event.target.closest("[data-circular-logout]")) {
+    state.circularCode = "";
+    state.circularEmployee = null;
+    state.circulars = null;
+    state.openCircularId = null;
+    return renderCircularLogin();
   }
 
   const shiftButton = event.target.closest("[data-shift]");

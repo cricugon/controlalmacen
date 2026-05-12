@@ -169,6 +169,13 @@ button {
   color: var(--red);
 }
 
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
 .button:disabled,
 .icon-button:disabled {
   opacity: 0.5;
@@ -351,6 +358,19 @@ button {
   min-height: 74px;
   padding: 13px 15px;
   cursor: pointer;
+  border-left-width: 7px;
+}
+
+.task-row.priority-low {
+  border-left-color: #229954;
+}
+
+.task-row.priority-medium {
+  border-left-color: #d99a00;
+}
+
+.task-row.priority-high {
+  border-left-color: var(--red);
 }
 
 .task-row > input[type="checkbox"] {
@@ -375,6 +395,18 @@ button {
   background: var(--green-soft);
 }
 
+.task-row.is-checked.priority-low {
+  border-left-color: #229954;
+}
+
+.task-row.is-checked.priority-medium {
+  border-left-color: #d99a00;
+}
+
+.task-row.is-checked.priority-high {
+  border-left-color: var(--red);
+}
+
 .task-row.is-checked .check-ui {
   color: #fff;
   border-color: var(--teal);
@@ -393,6 +425,40 @@ button {
   font-weight: 800;
 }
 
+.task-title-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.priority-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.priority-badge.priority-low {
+  color: #12643a;
+  background: #dff4e8;
+}
+
+.priority-badge.priority-medium {
+  color: #8a5600;
+  background: #fff0c2;
+}
+
+.priority-badge.priority-high {
+  color: #8f1d15;
+  background: #fde2df;
+}
+
 .task-content {
   min-width: 0;
 }
@@ -408,7 +474,7 @@ button {
 
 .production-controls {
   display: grid;
-  grid-template-columns: 64px minmax(130px, 210px) 64px minmax(130px, 1fr);
+  grid-template-columns: 64px minmax(130px, 210px) 64px minmax(130px, 1fr) minmax(130px, 1fr);
   gap: 8px;
   align-items: end;
   margin-top: 10px;
@@ -511,6 +577,52 @@ button {
 .notice-card p,
 .summary-card p {
   color: var(--muted);
+}
+
+.notice-head {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.read-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.read-pill.done {
+  color: var(--teal-dark);
+  background: var(--green-soft);
+}
+
+.read-pill.pending {
+  color: var(--amber);
+  background: #fff3d8;
+}
+
+.notice-card.is-viewed {
+  border-color: #9ed6c4;
+}
+
+.read-details {
+  margin-top: 8px;
+  color: var(--muted);
+}
+
+.read-details summary {
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.read-details p {
+  margin: 6px 0 0;
 }
 
 .section-head {
